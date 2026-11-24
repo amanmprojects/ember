@@ -1,0 +1,21 @@
+[package]
+name = "ember"
+version = "0.1.0"
+edition = "2024"
+description = "A small, fast GGUF inference engine for CPUs"
+license = "MIT"
+repository = "https://github.com/amanmprojects/ember"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[dependencies]
+anyhow = "1.0.105"
+clap = { version = "4.6.9", features = ["derive"] }
+fancy-regex = "0.20.2"
+half = "2.7.1"
+memmap2 = "0.9.12"
+minijinja = "3.1.0"
+minijinja-contrib = { version = "3.1.0", features = ["pycompat"] }
+rayon = "1.12.0"
