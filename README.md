@@ -2,8 +2,6 @@
 
 A small LLM inference engine for CPUs, written in Rust from scratch. It loads GGUF files (the format llama.cpp uses), runs Llama-family and Qwen models on quantized weights, and gets within reach of llama.cpp's speed in about 3,000 lines of code.
 
-I built it to learn how inference engines work. The code is meant to be read: every file starts with a comment explaining what it does and why.
-
 ```
 $ ember run -m qwen2.5-0.5b-instruct-q4_k_m.gguf --chat -p "What is 17*23? Answer briefly."
 ember: qwen2.5-0.5b-q4_k_m.gguf | Qwen2 24 layers, dim 896, heads 14/2, vocab 151936 | weights Q5_0x132 Q8_0x14 Q6_Kx12 Q4_Kx12 | 10 threads
@@ -11,6 +9,24 @@ ember: qwen2.5-0.5b-q4_k_m.gguf | Qwen2 24 layers, dim 896, heads 14/2, vocab 15
 
 [prompt: 41 tok, 209.2 tok/s | generated: 11 tok, 91.5 tok/s]
 ```
+
+## Why
+
+There's no practical reason. If you want to run models locally, use llama.cpp: it's faster, supports far more models and hardware, and is maintained by a lot of people.
+
+I wrote this to learn how inference works. Using llama.cpp teaches you which flags to pass. Building an engine forces you to answer the questions underneath:
+
+- **What is actually inside a `Q4_K_M` file?** You have to unpack the bits by hand to find out. A "4-bit" weight turns out to be a nibble plus 6-bit sub-block scales plus an f16 super-scale. That's why it costs 4.5 bits per weight, not 4.
+- **Why is generating text slow?** Each new token reads every weight in the model from RAM once. Profiling shows generation is limited by memory bandwidth, not arithmetic. That's why a smaller quantization runs faster, and why adding threads past the core count stops helping.
+- **Why is reading the prompt fast?** Prompt tokens can be processed together, so each weight block is read once and reused for several tokens. This changes the bottleneck from memory to compute.
+- **What do SIMD intrinsics buy you?** Kernel speeds swung 2x in both directions while I was writing these. A plain loop that LLVM didn't vectorize ran Q5_0 at a quarter of the speed of the other formats.
+- **Why do tokenizers have so many special cases?** Many small rules turn out to matter: a leading space, a missing BOS token, a regex that splits digits differently. Each one silently changes the model's output.
+
+The project stays small enough to read in one sitting: one file per concern, no framework, about 3,000 lines. Each file starts with a comment explaining what it does and why.
+
+Being small doesn't mean being sloppy. llama.cpp serves as the reference: every model's perplexity and every tokenizer case is checked against it, so "it seems to work" isn't the bar.
+
+**Why Rust?** One language covers both the safe parts (parsing untrusted files, string handling, the CLI) and the unsafe parts (AVX2 intrinsics, raw pointer writes from worker threads). The compiler marks exactly where the unsafe code is. **Why CPU only?** Nearly every machine has one, and on a CPU the performance limits are easy to see and measure.
 
 ## Features
 
