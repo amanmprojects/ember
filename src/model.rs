@@ -29,6 +29,8 @@ pub struct Config {
     pub eps: f32,
     pub rope_base: f32,
     pub rope_dim: usize,
+    /// Linear RoPE scaling: positions are divided by this factor.
+    pub rope_linear_scale: f32,
 }
 
 impl Config {
@@ -63,6 +65,19 @@ impl Config {
             eps: f.get_f32(&format!("{arch_name}.attention.layer_norm_rms_epsilon")).unwrap_or(1e-5),
             rope_base: f.get_f32(&format!("{arch_name}.rope.freq_base")).unwrap_or(10000.0),
             rope_dim: u("rope.dimension_count").unwrap_or(head_dim),
+            rope_linear_scale: {
+                let factor = f.get_f32(&format!("{arch_name}.rope.scaling.factor")).unwrap_or(1.0);
+                match f.get_str(&format!("{arch_name}.rope.scaling.type")) {
+                    Some("linear") if factor > 0.0 => factor,
+                    Some("none") | None => 1.0,
+                    Some(other) => {
+                        if factor != 1.0 {
+                            eprintln!("warning: {other} RoPE scaling is not implemented; long contexts may degrade");
+                        }
+                        1.0
+                    }
+                }
+            },
         })
     }
 
@@ -206,7 +221,7 @@ impl<'m, 'a> Session<'m, 'a> {
             model,
             n_ctx,
             tokens: Vec::new(),
-            rope: Rope::new(c.rope_dim, n_ctx, c.rope_base, neox, model.rope_freqs.as_deref()),
+            rope: Rope::new(c.rope_dim, n_ctx, c.rope_base, c.rope_linear_scale, neox, model.rope_freqs.as_deref()),
             k_cache: vec![0.0; kv],
             v_cache: vec![0.0; kv],
             max_batch: max_batch.max(1),

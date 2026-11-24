@@ -156,13 +156,20 @@ pub struct Rope {
 
 impl Rope {
     /// `freq_factors` (Llama 3 style long-context scaling) divides each
-    /// pair's frequency.
-    pub fn new(dim: usize, max_pos: usize, base: f32, neox: bool, freq_factors: Option<&[f32]>) -> Self {
+    /// pair's frequency; `linear_scale` divides every frequency.
+    pub fn new(
+        dim: usize,
+        max_pos: usize,
+        base: f32,
+        linear_scale: f32,
+        neox: bool,
+        freq_factors: Option<&[f32]>,
+    ) -> Self {
         let half = dim / 2;
         let mut cos = vec![0.0; max_pos * half];
         let mut sin = vec![0.0; max_pos * half];
         for i in 0..half {
-            let mut freq = base.powf(-2.0 * i as f32 / dim as f32);
+            let mut freq = base.powf(-2.0 * i as f32 / dim as f32) / linear_scale;
             if let Some(f) = freq_factors {
                 freq /= f[i];
             }

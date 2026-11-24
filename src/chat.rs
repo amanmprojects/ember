@@ -26,6 +26,9 @@ impl ChatTemplate {
     pub fn from_gguf(f: &GgufFile, tokens: &crate::tokenizer::Tokenizer) -> Result<Self> {
         let src = f.get_str("tokenizer.chat_template").unwrap_or(CHATML).to_owned();
         let mut env = Environment::new();
+        // HF transformers and llama.cpp render templates with these on, and
+        // most templates rely on them to avoid stray newlines.
+        env.set_syntax(minijinja::syntax::SyntaxConfig::builder().trim_blocks(true).lstrip_blocks(true).build()?);
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         env.add_function("raise_exception", |msg: String| -> Result<String, Error> {
             Err(Error::new(ErrorKind::InvalidOperation, msg))

@@ -104,7 +104,14 @@ Each format has a single decoder, and both the integer kernel and the f32 dequan
 
 | File | Lines | Contents |
 |---|---|---|
-LOC_TABLE
+| [`src/gguf.rs`](src/gguf.rs) | 285 | GGUF parser over mmap |
+| [`src/quant.rs`](src/quant.rs) | 884 | Block formats, decoders, activation quantization, AVX2 dot kernels, tests |
+| [`src/ops.rs`](src/ops.rs) | 246 | Threaded quantized matmul, RMSNorm, softmax, RoPE, profiler |
+| [`src/model.rs`](src/model.rs) | 352 | Model config, weight loading, forward pass, KV cache |
+| [`src/tokenizer.rs`](src/tokenizer.rs) | 444 | SentencePiece and GPT-2 BPE tokenizers, special tokens, streaming UTF-8 decode |
+| [`src/sampler.rs`](src/sampler.rs) | 111 | Repetition penalty, temperature, top-k, top-p, min-p |
+| [`src/chat.rs`](src/chat.rs) | 76 | Chat templates via minijinja |
+| [`src/main.rs`](src/main.rs) | 511 | CLI: run, chat (KV-cache prefix reuse), bench, ppl, tokenize, inspect |
 
 ## Limitations and next steps
 

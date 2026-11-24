@@ -14,6 +14,7 @@ use fancy_regex::Regex;
 
 use crate::gguf::GgufFile;
 
+const TYPE_UNKNOWN: i32 = 2;
 const TYPE_CONTROL: i32 = 3;
 const TYPE_USER_DEFINED: i32 = 4;
 const TYPE_BYTE: i32 = 6;
@@ -24,7 +25,8 @@ enum Kind {
         byte_ids: Box<[Option<u32>; 256]>,
     },
     Bpe {
-        ranks: HashMap<(String, String), usize>,
+        /// (left id, right id) -> (merge rank, merged id)
+        ranks: HashMap<(u32, u32), (usize, u32)>,
         /// Llama 3: a pre-token that is already a vocab entry is used as-is
         /// instead of being rebuilt from merges.
         ignore_merges: bool,
@@ -54,7 +56,6 @@ const GPT2_RE: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{
 const LLAMA3_RE: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const QWEN2_RE: &str =
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
-const SMOLLM_RE: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
 
 /// GPT-2's reversible byte -> printable-unicode map.
 fn bytes_to_unicode() -> [char; 256] {
@@ -111,20 +112,29 @@ impl Tokenizer {
                 let ranks = merges
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, m)| {
+                    .filter_map(|(rank, m)| {
                         let (a, b) = m.split_once(' ')?;
-                        Some(((a.to_owned(), b.to_owned()), i))
+                        let merged = lookup.get(&format!("{a}{b}"))?;
+                        Some(((*lookup.get(a)?, *lookup.get(b)?), (rank, *merged)))
                     })
                     .collect();
-                let re = match pre_name {
-                    _ if llama3 => LLAMA3_RE,
-                    "qwen2" | "deepseek-r1-qwen" | "qwen35" | "megrez" => QWEN2_RE,
-                    "smollm" => SMOLLM_RE,
-                    _ => GPT2_RE,
+                let re: &[&str] = match pre_name {
+                    _ if llama3 => &[LLAMA3_RE],
+                    "qwen2" | "deepseek-r1-qwen" | "qwen35" | "megrez" => &[QWEN2_RE],
+                    // SmolLM splits digits apart first, then applies GPT-2's rules.
+                    "smollm" => &[r"\p{N}", GPT2_RE],
+                    "gpt-2" | "gpt2" | "default" | "starcoder" | "refact" | "phi-2" => &[GPT2_RE],
+                    other => bail!("unsupported BPE pre-tokenizer {other:?}"),
                 };
                 let byte_enc = Box::new(bytes_to_unicode());
                 let byte_dec = byte_enc.iter().enumerate().map(|(b, &c)| (c, b as u8)).collect();
-                Kind::Bpe { ranks, ignore_merges: llama3, pre: vec![Regex::new(re)?], byte_enc, byte_dec }
+                Kind::Bpe {
+                    ranks,
+                    ignore_merges: llama3,
+                    pre: re.iter().map(|r| Regex::new(r)).collect::<Result<_, _>>()?,
+                    byte_enc,
+                    byte_dec,
+                }
             }
             other => bail!("unsupported tokenizer model {other:?}"),
         };
@@ -132,7 +142,7 @@ impl Tokenizer {
         let mut specials: Vec<(String, u32)> = types
             .iter()
             .enumerate()
-            .filter(|&(i, &t)| (t == TYPE_CONTROL || t == TYPE_USER_DEFINED) && !tokens[i].is_empty())
+            .filter(|&(i, &t)| matches!(t, TYPE_UNKNOWN | TYPE_CONTROL | TYPE_USER_DEFINED) && !tokens[i].is_empty())
             .map(|(i, _)| (tokens[i].clone(), i as u32))
             .collect();
         specials.sort_by_key(|(s, _)| std::cmp::Reverse(s.len()));
@@ -338,29 +348,51 @@ impl Tokenizer {
         }
     }
 
-    fn bpe_word(&self, word: &str, ranks: &HashMap<(String, String), usize>, ignore_merges: bool, out: &mut Vec<u32>) {
+    /// Byte-level BPE on one pre-token: repeatedly apply the lowest-ranked
+    /// merge among adjacent symbols. A heap of candidate pairs over a linked
+    /// list keeps this O(n log n), so a huge pasted word doesn't hang.
+    fn bpe_word(&self, word: &str, ranks: &HashMap<(u32, u32), (usize, u32)>, ignore_merges: bool, out: &mut Vec<u32>) {
+        use std::cmp::Reverse;
         if ignore_merges && let Some(&id) = self.lookup.get(word) {
             out.push(id);
             return;
         }
-        let mut parts: Vec<String> = word.chars().map(String::from).collect();
-        loop {
-            let best = parts
-                .windows(2)
-                .enumerate()
-                .filter_map(|(i, w)| ranks.get(&(w[0].clone(), w[1].clone())).map(|&r| (r, i)))
-                .min();
-            let Some((_, i)) = best else { break };
-            let merged = format!("{}{}", parts[i], parts[i + 1]);
-            parts[i] = merged;
-            parts.remove(i + 1);
+        // Every byte-mapped char is a vocab entry in GPT-2-style vocabularies.
+        let mut ids: Vec<u32> =
+            word.chars().filter_map(|c| self.lookup.get(c.encode_utf8(&mut [0; 4])).copied()).collect();
+        let n = ids.len();
+        let mut next: Vec<usize> = (1..=n).collect(); // n = end
+        let mut prev: Vec<usize> = (0..n).map(|i| i.wrapping_sub(1)).collect(); // usize::MAX = start
+        let mut alive = vec![true; n];
+        let mut heap = BinaryHeap::new();
+        let push = |heap: &mut BinaryHeap<_>, ids: &[u32], l: usize, r: usize| {
+            if let Some(&(rank, _)) = ranks.get(&(ids[l], ids[r])) {
+                heap.push(Reverse((rank, l, ids[l], ids[r])));
+            }
+        };
+        for i in 1..n {
+            push(&mut heap, &ids, i - 1, i);
         }
-        for p in parts {
-            match self.lookup.get(&p) {
-                Some(&id) => out.push(id),
-                None => out.extend(p.chars().filter_map(|c| self.lookup.get(&c.to_string()).copied())),
+        while let Some(Reverse((_, l, lid, rid))) = heap.pop() {
+            let r = next[l];
+            // Stale entry: either side has changed since it was queued.
+            if !alive[l] || r >= n || ids[l] != lid || ids[r] != rid {
+                continue;
+            }
+            ids[l] = ranks[&(lid, rid)].1;
+            alive[r] = false;
+            next[l] = next[r];
+            if next[l] < n {
+                prev[next[l]] = l;
+            }
+            if prev[l] != usize::MAX {
+                push(&mut heap, &ids, prev[l], l);
+            }
+            if next[l] < n {
+                push(&mut heap, &ids, l, next[l]);
             }
         }
+        out.extend((0..n).filter(|&i| alive[i]).map(|i| ids[i]));
     }
 
     /// Raw bytes a token contributes to output text. Control tokens are
@@ -425,20 +457,44 @@ pub struct StreamDecoder {
 impl StreamDecoder {
     pub fn push(&mut self, bytes: &[u8]) -> String {
         self.pending.extend_from_slice(bytes);
-        match std::str::from_utf8(&self.pending) {
-            Ok(s) => {
-                let s = s.to_owned();
-                self.pending.clear();
-                s
-            }
-            Err(e) => {
-                let valid = e.valid_up_to();
-                // An invalid (not just incomplete) sequence: emit lossily.
-                let cut = if e.error_len().is_some() { self.pending.len() } else { valid };
-                let s = String::from_utf8_lossy(&self.pending[..cut]).into_owned();
-                self.pending.drain(..cut);
-                s
+        let mut out = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(s) => {
+                    out.push_str(s);
+                    self.pending.clear();
+                    return out;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    out.push_str(std::str::from_utf8(&self.pending[..valid]).unwrap());
+                    match e.error_len() {
+                        // Invalid bytes: replace just those and keep going.
+                        Some(bad) => {
+                            out.push(char::REPLACEMENT_CHARACTER);
+                            self.pending.drain(..valid + bad);
+                        }
+                        // Incomplete sequence at the end: wait for more bytes.
+                        None => {
+                            self.pending.drain(..valid);
+                            return out;
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamDecoder;
+
+    #[test]
+    fn stream_decoder_holds_partial_utf8() {
+        let mut d = StreamDecoder::default();
+        assert_eq!(d.push(&[0xFF, 0xE2, 0x82]), "\u{FFFD}");
+        assert_eq!(d.push(&[0xAC]), "€");
+        assert_eq!(d.push(b"ok"), "ok");
     }
 }

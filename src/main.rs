@@ -296,6 +296,9 @@ fn generate(
     max_tokens: usize,
     mut emit: impl FnMut(&str),
 ) -> Result<(Vec<u32>, GenStats)> {
+    if new_tokens.is_empty() {
+        bail!("empty prompt: nothing to condition on");
+    }
     let t0 = Instant::now();
     let mut logits = sess.forward(new_tokens, Logits::Last)?;
     let prompt_secs = t0.elapsed().as_secs_f64();
@@ -400,14 +403,22 @@ fn chat_repl(args: &LoadArgs, system: Option<String>, max_tokens: usize, samplin
         }
         msgs.push(Message { role: "user".into(), content: line.into() });
         let tokens = chat_tokens(&l.tok, &tmpl, &msgs)?;
+        if tokens.len() >= sess.n_ctx {
+            eprintln!(
+                "[conversation is {} tokens, context is {}; use /reset or a larger --ctx]",
+                tokens.len(),
+                sess.n_ctx
+            );
+            msgs.pop();
+            continue;
+        }
         // Reuse the KV cache for the shared prefix; only run the new tail.
         let common = sess.tokens.iter().zip(&tokens).take_while(|(a, b)| a == b).count();
         let common = common.min(tokens.len() - 1);
         sess.truncate(common);
-        if tokens.len() + max_tokens > sess.n_ctx {
-            bail!("conversation exceeds context ({} tokens); use /reset or a larger --ctx", tokens.len());
-        }
-        let (out, stats) = generate(&mut sess, &l.tok, &mut sampler, &tokens[common..], max_tokens, print_flush)?;
+        // Generate as much as fits in what's left of the context.
+        let budget = max_tokens.min(sess.n_ctx - tokens.len());
+        let (out, stats) = generate(&mut sess, &l.tok, &mut sampler, &tokens[common..], budget, print_flush)?;
         println!();
         stats.print();
         msgs.push(Message { role: "assistant".into(), content: l.tok.decode(&out) });
