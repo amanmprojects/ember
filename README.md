@@ -1,6 +1,6 @@
 # ember
 
-A small LLM inference engine for CPUs, written in Rust from scratch. It loads GGUF files (the format llama.cpp uses), runs Llama-family and Qwen models on quantized weights, and gets within reach of llama.cpp's speed in about 2,900 lines of code.
+A small LLM inference engine for CPUs, written in Rust from scratch. It loads GGUF files (the format llama.cpp uses), runs Llama-family and Qwen models on quantized weights, and gets within reach of llama.cpp's speed in about 3,000 lines of code.
 
 I built it to learn how inference engines work. The code is meant to be read: every file starts with a comment explaining what it does and why.
 
@@ -56,9 +56,15 @@ Perplexity on wikitext-2 (first 10 chunks of 512 tokens), compared with llama.cp
 
 | Model | ember | llama.cpp |
 |---|---|---|
-RESULTS_PPL
+| TinyLlama 1.1B Q4_K_M | 25.39 | 25.40 |
+| TinyLlama 1.1B Q4_0 | 25.66 | 25.65 |
+| TinyLlama 1.1B Q5_K_M | 24.72 | 24.75 |
+| TinyLlama 1.1B Q2_K (Q2_K + Q3_K weights) | 29.39 | 29.29 |
+| Qwen2.5 0.5B Q4_K_M | 17.08 | 17.06 |
+| Qwen3 0.6B Q8_0 | 23.73 | 23.82 |
+| Llama 3.2 1B Q3_K_L (Q3_K + Q5_K weights) | 17.40 | 17.41 |
 
-Small differences are expected: llama.cpp stores its KV cache in f16 and rounds activations slightly differently.
+Every model is within 0.4%. Small differences are expected: llama.cpp stores its KV cache in f16 and rounds activations slightly differently.
 
 Tokenization matches `llama-tokenize` exactly for SentencePiece and GPT-2 BPE models on a set of strings covering contractions, Unicode, emoji, code, digit runs, whitespace runs, and special tokens. `cargo test` checks every quant format's integer kernel against a dequantize-then-f32 reference, for every tile size.
 
@@ -68,9 +74,13 @@ Intel i7-13620H (6P+4E cores, AVX2, DDR5), 10 threads for ember and llama.cpp's 
 
 | Model | ember pp256 | llama.cpp pp256 | ember tg64 | llama.cpp tg64 |
 |---|---|---|---|---|
-RESULTS_BENCH
+| TinyLlama 1.1B Q4_K_M | 151 | 241 | 63 | 60 |
+| TinyLlama 1.1B Q4_0 | 121 | 229 | 60 | 72 |
+| Qwen2.5 0.5B Q4_K_M | 250 | 306 | 91 | 91 |
+| Qwen3 0.6B Q8_0 | 234 | 240 | 65 | 56 |
+| Llama 3.2 1B Q3_K_L | 140 | 250 | 52 | 58 |
 
-Generation (tg) is limited by memory bandwidth: every generated token streams the whole model from RAM. ember is close to llama.cpp there. Prompt processing (pp) is limited by compute, and that's where llama.cpp's extra work shows. On AVX2 it repacks Q4_0 weights into interleaved row groups so a single instruction works on 8 rows at once. ember doesn't do that yet.
+Generation (tg) is limited by memory bandwidth: every generated token streams the whole model from RAM. ember is at 0.8–1.15× llama.cpp there. Prompt processing (pp) is limited by compute, and ember is at 0.5–1.0× llama.cpp there. On AVX2 it repacks Q4_0 weights into interleaved row groups so a single instruction works on 8 rows at once. ember doesn't do that yet.
 
 ## How it works
 
@@ -106,17 +116,17 @@ Each format has a single decoder, and both the integer kernel and the f32 dequan
 |---|---|---|
 | [`src/gguf.rs`](src/gguf.rs) | 285 | GGUF parser over mmap |
 | [`src/quant.rs`](src/quant.rs) | 884 | Block formats, decoders, activation quantization, AVX2 dot kernels, tests |
-| [`src/ops.rs`](src/ops.rs) | 246 | Threaded quantized matmul, RMSNorm, softmax, RoPE, profiler |
-| [`src/model.rs`](src/model.rs) | 352 | Model config, weight loading, forward pass, KV cache |
-| [`src/tokenizer.rs`](src/tokenizer.rs) | 444 | SentencePiece and GPT-2 BPE tokenizers, special tokens, streaming UTF-8 decode |
+| [`src/ops.rs`](src/ops.rs) | 253 | Threaded quantized matmul, RMSNorm, softmax, RoPE, profiler |
+| [`src/model.rs`](src/model.rs) | 367 | Model config, weight loading, forward pass, KV cache |
+| [`src/tokenizer.rs`](src/tokenizer.rs) | 500 | SentencePiece and GPT-2 BPE tokenizers, special tokens, streaming UTF-8 decode |
 | [`src/sampler.rs`](src/sampler.rs) | 111 | Repetition penalty, temperature, top-k, top-p, min-p |
-| [`src/chat.rs`](src/chat.rs) | 76 | Chat templates via minijinja |
-| [`src/main.rs`](src/main.rs) | 511 | CLI: run, chat (KV-cache prefix reuse), bench, ppl, tokenize, inspect |
+| [`src/chat.rs`](src/chat.rs) | 79 | Chat templates via minijinja |
+| [`src/main.rs`](src/main.rs) | 522 | CLI: run, chat (KV-cache prefix reuse), bench, ppl, tokenize, inspect |
 
 ## Limitations and next steps
 
 - **CPU only, x86-64 AVX2 fast path.** Other targets compile and use portable scalar code, which is correct but slow. NEON kernels would be the obvious addition.
-- **Prefill is 0.5–0.9× llama.cpp.** The next step is repacking weights at load time into interleaved row groups (as llama.cpp does for Q4_0) so one SIMD instruction works on several rows.
+- **Prefill is 0.5–1.0× llama.cpp.** The next step is repacking weights at load time into interleaved row groups (as llama.cpp does for Q4_0) so one SIMD instruction works on several rows.
 - The KV cache is f32. f16 would halve its memory use and the bandwidth attention needs at long context.
 - No IQ (importance-matrix) quant formats, no MoE, no multimodal models.
 - One sequence at a time: no batching of independent requests and no server.
